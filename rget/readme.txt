@@ -1,4 +1,4 @@
-RGET v0.2 by GTAMP (c) 2026
+RGET v0.4 by GTAMP (c) 2026
 ---------------------------
 
 Basically wget for NABU PC CP/M.
@@ -12,6 +12,8 @@ Examples:
 RGET gtamp.com/nabu/vgmp.com v.com
 RGET gtamp.com/nabu/oilswell.com
 RGET ia: (list directory)
+RGET ia:file.com
+RGET ia:file.com f.com
 RGET ia:vgm/*.vgm (batch download with wildcard support)
 RGET /U (self updates RGET from gtamp.com/nabu/rget.com)
 RGET (if you need to type a URL with mixed case, leave command line blank)
