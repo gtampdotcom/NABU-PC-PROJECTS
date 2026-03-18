@@ -1,4 +1,4 @@
-RGET v0.4 by GTAMP (c) 2026
+RGET v0.5 by GTAMP (c) 2026
 ---------------------------
 
 Basically wget for NABU PC CP/M.
