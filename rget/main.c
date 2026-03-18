@@ -1,5 +1,5 @@
 /*
- * RetroNet Get (RGET) v0.4 by GTAMP (c) 2026
+ * RetroNet Get (RGET) v0.5 by GTAMP (c) 2026
  */
 
 #define BIN_TYPE BIN_CPM
@@ -16,7 +16,7 @@
 
 #define CPM_CMD_LEN  (*(uint8_t *)0x0080)
 #define CPM_CMD_TEXT ((char *)0x0081)
-#define BUFFERSIZE 128
+#define BUFFERSIZE 512
 
 #ifndef OPEN_FILE_FLAG_READONLY
 #define OPEN_FILE_FLAG_READONLY 0x01 
@@ -162,7 +162,6 @@ uint8_t downloadFile(const char* path, const char* localName, uint8_t skipCheck)
     printf("Saving: %-12s (%ldb)\n", localName, details.FileSize);
 
     while (currentFileBytes < (uint32_t)details.FileSize) {
-        if (kbhit() && getch() == 0x03) abortProg(handle, fp, "ABORTED");
         readBytes = rn_fileHandleReadSeq(handle, _buffer, 0, BUFFERSIZE);
         if (readBytes == 0) break; 
         if (fwrite(_buffer, 1, readBytes, fp) != readBytes) {
@@ -172,9 +171,12 @@ uint8_t downloadFile(const char* path, const char* localName, uint8_t skipCheck)
         currentFileBytes += (uint32_t)readBytes;
         updateCounter++;
 
-        /* 8 packets * 128 bytes = 1024 bytes */
-        if (updateCounter >= 8 || currentFileBytes >= (uint32_t)details.FileSize) {
+        /* update progress meter */
+        if (updateCounter >= 4 || currentFileBytes >= (uint32_t)details.FileSize) {
             updateCounter = 0;
+			
+			if (kbhit() && getch() == 0x03) abortProg(handle, fp, "ABORTED");
+			
             pct = (uint8_t)((currentFileBytes * 100) / details.FileSize);
             barChars = pct / 10;
             printf("\r[");
@@ -200,7 +202,7 @@ void main() {
     char finalUrl[160], finalLocal[16], workBuf[160];
     uint8_t yn;
 
-    printf("RetroNet Get v0.4 by GTAMP (c) 2026\n");
+    printf("RetroNet Get v0.5 by GTAMP (c) 2026\n");
     printf("Type RGET /? for help\n\n");
 
     rawUrl[0] = '\0'; rawFile[0] = '\0';
