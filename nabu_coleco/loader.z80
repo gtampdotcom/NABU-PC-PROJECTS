@@ -49,10 +49,10 @@ main:
     ld bc, embedded_bios_end - embedded_bios        
     ldir
 	
-	ld hl, embedded_rom + 0x8000 - 1
-    ld de, 0xFFFF
-    ld bc, 0x8000
-    lddr
+	ld hl, embedded_rom + 0x8000 - 1  ; End of 32KB source buffer
+    ld de, 0xFFFF                    ; End of NABU RAM
+    ld bc, 0x8000                    ; Length: 32,768 bytes
+    lddr                             ; Transfer
 	
 	call install_interrupt_handlers
     call install_emulation_vectors
