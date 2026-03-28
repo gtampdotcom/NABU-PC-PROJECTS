@@ -1,0 +1,94 @@
+; ColecoVision ROM Loader
+;
+; Copyright (c) 2024 Brian Johnson.  All rights reserved.
+;
+; Redistribution and use in source and binary forms, with or without
+; modification, are permitted provided that the following conditions
+; are met:
+; 1. Redistributions of source code must retain the above copyright
+;    notice, this list of conditions and the following disclaimer.
+; 2. Redistributions in binary form must reproduce the above copyright
+;    notice, this list of conditions and the following disclaimer in the
+;    documentation and/or other materials provided with the distribution.
+;
+; THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+; IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+; OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+; IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+; INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+; NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+; DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+; THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+; (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+; THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+.section .crt0, "acrx"
+
+    nop
+    nop
+    nop
+entry:
+    di                                      ; Ensure interrupts are disabled
+    ld sp, 0x73b9                           ; Setup stack out of the way
+
+    ; Relocate code to address 0x2110
+    ld hl, reloc_end - 1
+    ld de, reloc_start
+    ld bc, reloc_length
+    lddr
+
+    jp main                                 ; Jump to relocated main program                                
+
+; =========================================================================
+.section .text, "acrx"
+; =========================================================================
+
+main:
+    ld hl, embedded_bios                            
+    ld de, 0x0000                                   
+    ld bc, embedded_bios_end - embedded_bios        
+    ldir
+	
+	ld hl, embedded_rom + 0x8000 - 1
+    ld de, 0xFFFF
+    ld bc, 0x8000
+    lddr
+	
+	call install_interrupt_handlers
+    call install_emulation_vectors
+    call init_tms9918
+    call init_sound
+
+	ld a, 0x07              ; Select Mixer Register
+	out (0x41), a
+	ld a, 0x78              ; All Sound ON, Port A=In, Port B=Out
+	out (0x40), a
+	ld a, 0x0F              ; Select Port B (Interrupt Mask)
+	out (0x41), a
+	
+start_rom:
+    
+	ld a, 0x03								; Disable NABU rom
+    out (0x00), a
+	
+    jp 0x0000                               ; Launch Coleco BIOS
+	
+
+; =========================================================================
+.section .data, "adrw"
+; =========================================================================
+
+banner:    .byte "ColecoVision ROM Loader", 0
+byline:    .byte "By Brian Johnson", 0
+bios_msg:  .byte "                ", 0
+patch_msg: .byte "                ", 0
+rom_msg:   .byte "                ", 0
+
+embedded_bios:    .incbin "000002.nabu"
+embedded_bios_end:
+
+embedded_patches: .incbin "000003.nabu"
+embedded_patches_end:
+
+embedded_rom:     .incbin "000004.nabu"
+embedded_rom_end:
