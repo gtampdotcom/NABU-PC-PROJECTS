@@ -112,8 +112,8 @@ uint8_t tn_xchg(uint8_t cmd, uint16_t payLen) {
 
 void do_download(uint8_t index) {
     FILE *fp; uint32_t totalBytes = 0; uint16_t readLen;
-    uint8_t fh;
-    char fullPath[128], destName[64], inputBuf[34], temp[64], *p, *dot;
+    uint8_t fh, origUser, origDrive, destUser = 0xff, destDrive = 0xff;
+    char fullPath[128], destName[36], inputBuf[34], temp[64], *p, *dot;
 
     strcpy(temp, g_fileList[index].name);
     dot = strrchr(temp, '.');
@@ -132,28 +132,30 @@ void do_download(uint8_t index) {
     if (strlen(inputBuf) > 0) strcpy(destName, inputBuf);
 
     for(int i = 0; destName[i]; i++) destName[i] = toupper(destName[i]);
-    
-    /* z88dk VFS Path Re-formatting
-       Transforms standard inputs like D1:FILE.TXT into 1/D:FILE.TXT 
-    */
     p = strchr(destName, ':');
     if (p) {
-        char driveLtr = 0; int usrNum = -1; char newPath[64];
-        
         if (destName[0] >= 'A' && destName[0] <= 'P') {
-            driveLtr = destName[0];
-            if (isdigit(destName[1])) usrNum = atoi(&destName[1]);
-        } else if (isdigit(destName[0])) {
-            usrNum = atoi(&destName[0]);
+            destDrive = destName[0] - 'A';
+            /* Scan all digits between drive letter and colon for user number.
+               e.g. "B11:FILE.COM" -> drive=B(1), user=11 */
+            if (isdigit(destName[1])) destUser = (uint8_t)atoi(&destName[1]);
         }
-        
-        // Construct z88dk VFS compatible path: [user/][drive:]filename
-        if (usrNum >= 0 && driveLtr) sprintf(newPath, "%d/%c:%s", usrNum, driveLtr, p + 1);
-        else if (usrNum >= 0) sprintf(newPath, "%d/%s", usrNum, p + 1);
-        else if (driveLtr) sprintf(newPath, "%c:%s", driveLtr, p + 1);
-        else strcpy(newPath, p + 1);
-        
-        strcpy(destName, newPath);
+        memmove(destName, p + 1, strlen(p + 1) + 1);
+    }
+
+    origUser = bdos(32, 0xFF); origDrive = bdos(25, 0);
+    /* Set user area first (BDOS fn 32), then drive (BDOS fn 14).
+       Also build a drive-prefixed filename so Cloud CP/M fopen()
+       routes to the correct drive regardless of BDOS state. */
+    if (destUser != 0xff) bdos(32, destUser);
+    if (destDrive != 0xff) {
+        bdos(14, destDrive);
+        /* Prepend "X:" so fopen sees an explicit drive path */
+        char driveDest[35];
+        driveDest[0] = (char)('A' + destDrive);
+        driveDest[1] = ':';
+        strncpy(&driveDest[2], destName, 32); driveDest[34] = '\0';
+        strcpy(destName, driveDest);
     }
 
     move_cursor(22, 0); printf("%-39s", "");
@@ -165,18 +167,10 @@ void do_download(uint8_t index) {
 
     g_txBuf[4] = 0x01; g_txBuf[5] = 0x00;
     strcpy((char*)&g_txBuf[6], fullPath);
-    if (!tn_xchg(CMD_OPENFILE, (uint16_t)strlen(fullPath) + 3) || g_buf[4] != 0) {
-        getch(); return; 
-    }
+    if (!tn_xchg(CMD_OPENFILE, (uint16_t)strlen(fullPath) + 3) || g_buf[4] != 0) goto cleanup;
     
-    fh = g_buf[5]; 
-    
-    // The VFS now naturally handles the user/drive routing without fighting the OS
-    fp = fopen(destName, "wb");
-    if (!fp) {
-        g_txBuf[4] = fh; tn_xchg(CMD_CLOSEFILE, 1); // Close remote if local fails
-        getch(); return;
-    }
+    fh = g_buf[5]; fp = fopen(destName, "wb");
+    if (!fp) goto cleanup;
     
     { uint8_t blk = 0;
     while (1) {
@@ -189,13 +183,10 @@ void do_download(uint8_t index) {
         totalBytes += (uint32_t)readLen;
         if ((++blk & 7) == 0) { move_cursor(23, 0); printf("%-15lu", totalBytes); }
     } }
-    
-    fclose(fp); 
-    g_txBuf[4] = fh; 
-    tn_xchg(CMD_CLOSEFILE, 1);
-    
+    fclose(fp); g_txBuf[4] = fh; tn_xchg(CMD_CLOSEFILE, 1);
     move_cursor(23, 20); printf("DONE.");
-    getch();
+cleanup:
+    bdos(14, origDrive); bdos(32, origUser); getch();
 }
 
 void load_dir() {
@@ -288,12 +279,16 @@ void save_last_server(uint8_t idx) {
 /* Load last server index from TNFS.INI; returns 0 if missing/invalid */
 uint8_t load_last_server(void) {
     FILE *fp = fopen("TNFS.INI", "r");
-    uint8_t idx = 0;
+    unsigned int temp_idx = 0; // Use a 16-bit int for fscanf
+    
     if (!fp) return 0;
-    fscanf(fp, "%u", (unsigned *)&idx);
+    
+    fscanf(fp, "%u", &temp_idx);
     fclose(fp);
-    if (idx >= g_numServers) idx = 0;
-    return idx;
+    
+    if (temp_idx >= g_numServers) temp_idx = 0;
+    
+    return (uint8_t)temp_idx;
 }
 
 #define SERVER_PAGE 20
