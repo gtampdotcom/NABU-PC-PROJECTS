@@ -12,6 +12,8 @@ Auto launching is currently not supported on Cloud CPM Text.
 TNFS uses the $$$.SUB method to launch .com files on every other CP/M
 It tries to append to the end if it already exists. It can fail if there are too many files or it can't write.
 
+It uses direct hardware access for keyboard/joystick but you can force it to use the CPM BIOS with /t command line.
+
 Changelog:
 
 2026-04-04 v0.3
