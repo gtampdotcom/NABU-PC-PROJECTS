@@ -1,9 +1,16 @@
 NABU CP/M TNFS client v0.3 by GTAMP (c) 2026
 Trivial/Tiny/Taco Network File System, as used by SpectraNet, FujiNet and now RetroNet
 
+I had never owned or used a FujiNet device or TNFS before creating this for NABU
+I knew nothing about the TNFS protocol but I knew FujiNet had a way to download files.
+I had already been making NABU and RetroNet software, so making a TNFS client seemed like a good next step.
+Shoutout to the NABU, retro and FujiNet communities.
 
 TNFS can launch .com files under Cloud CPM GUI using BDOS function 59 (P_LOAD)
-Auto launching currently not supported on Cloud CPM Text.
+Auto launching is currently not supported on Cloud CPM Text.
+
+TNFS uses the $$$.SUB method to launch .com files on every other CP/M
+It tries to append to the end if it already exists. It can fail if there are too many files or it can't write.
 
 Changelog:
 
