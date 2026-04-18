@@ -14,4 +14,6 @@ The screen is blank while flashing but it is outputing text to CP/M, so if you r
 
 Download updated .uf2 firmware files from https://github.com/visrealm/pico9918/ and rename them to a short name like 111.uf2 for easy typing.
 
+This is a third party tool, so don't ask visrealm for support.
+
 <img width="596" height="294" alt="image" src="https://github.com/user-attachments/assets/641ed9a5-fd0b-4e27-8fbd-4c30c39762ab" />
