@@ -11,36 +11,36 @@
 	; Assemble wtih gasm80 https://github.com/nanochess/gasm80
 	;
 
-NABUCPM:	equ 0		; 0=NABU  1=CPM COM
+NABUCPM:		equ 0		; 0=NABU  1=CPM COM
 
-VDPRAM:		equ $A0		; VDP data port
-VDPIO:		equ $A1		; VDP control/status port
-KBDDAT:		equ $90		; Keyboard data
-KBDSTA:		equ $91		; Keyboard status
+VDPRAM:			equ $A0		; VDP data port
+VDPIO:			equ $A1		; VDP control/status port
+KBDDAT:			equ $90		; Keyboard data
+KBDSTA:			equ $91		; Keyboard status
 
-ROW_WIDTH:	equ 40
+ROW_WIDTH:		equ 40
 BOX_MAX_WIDTH:	equ 11
 BOX_MAX_HEIGHT:	equ 6
-BOX_WIDTH:	equ 13
-BOX_HEIGHT:	equ 8
+BOX_WIDTH:		equ 13
+BOX_HEIGHT:		equ 8
 
-GR_VERT:	equ 0xba
+GR_VERT:		equ 0xba
 GR_TOP_RIGHT:	equ 0xbb
 GR_BOT_RIGHT:	equ 0xbc
 GR_BOT_LEFT:	equ 0xc8
 GR_TOP_LEFT:	equ 0xc9
-GR_HORIZ:	equ 0xcd
-GR_TUNNEL:	equ 0xb1
-GR_DOOR:	equ 0xce
-GR_FLOOR:	equ 0xfa
-GR_HERO:	equ 0x01
-GR_LADDER:	equ 0xf0
-GR_TRAP:	equ 0x04
-GR_FOOD:	equ 0x05
-GR_ARMOR:	equ 0x08
-GR_YENDOR:	equ 0x0c
-GR_GOLD:	equ 0x0f
-GR_WEAPON:	equ 0x18
+GR_HORIZ:		equ 0xcd
+GR_TUNNEL:		equ 0xb1
+GR_DOOR:		equ 0xce
+GR_FLOOR:		equ 0xfa
+GR_HERO:		equ 0x01
+GR_LADDER:		equ 0xf0
+GR_TRAP:		equ 0x04
+GR_FOOD:		equ 0x05
+GR_ARMOR:		equ 0x08
+GR_YENDOR:		equ 0x0c
+GR_GOLD:		equ 0x0f
+GR_WEAPON:		equ 0x18
 
 YENDOR_LEVEL:	equ 26
 
