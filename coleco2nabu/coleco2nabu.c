@@ -331,7 +331,7 @@ static void free_code(CodeMap* c) {
     free(c->owner); free(c->xowner); free(c);
 }
 
-enum { ACCEPT_ANY, ACCEPT_IM1, ACCEPT_DI, ACCEPT_PORT, ACCEPT_LDC };
+enum { ACCEPT_ANY, ACCEPT_IM1, ACCEPT_DI, ACCEPT_PORT, ACCEPT_LDC, ACCEPT_SOUND };
 
 // ROM offsets (by ROM CRC16) that look like port I/O but are data the tracer can't tell apart, so they
 // must not be patched.
@@ -399,6 +399,11 @@ int find_and_replace(uint8_t* data, size_t size, const uint8_t* search, const ui
                 int traced = code->xstart[i] && !code->xconflict[i];
                 if (!(traced && uses_c_as_port(data, size, i + 3)) && !port_op_soon(data, size, i + 3)) continue;
             }
+            else if (accept == ACCEPT_SOUND) {
+                int traced = code->xstart[i] && !code->xconflict[i];
+                if (!traced && !(i >= 2 && (data[i - 2] == 0x3E || data[i - 2] == 0xF6) && data[i - 1] >= 0x80 &&
+                                 lands_on(data, size, i))) continue;
+            }
             else if (accept != ACCEPT_ANY && (!code->xstart[i] || code->xconflict[i])) continue;
             if (accept == ACCEPT_DI && (code->nmi_uses_ei || di_guards_section(data, size, i))) continue;
         }
@@ -424,6 +429,7 @@ static const uint8_t im1_op[2] = {0xED, 0x56}, di_op[1] = {0xF3}, nops[2] = {0x0
 #define STUB_INFO_LEN 17
 #define LOADER_OPT_SWAP_FIRE 0x01       // loader_options bits (loader/interrupts.z80)
 #define LOADER_OPT_SWAP_PORTS 0x02
+#define LOADER_OPT_UP_BUTTON2 0x04
 typedef struct { uint8_t* stub; int info_off, self, next, end, saved, options, read_port_c, option_bits; } Gap;
 
 static int stub_info(Gap* g, uint8_t* stub, size_t stub_off) {
@@ -482,6 +488,93 @@ static void install_vectors(uint8_t* rom, size_t rom_len, const uint8_t* orig, V
             memcpy(&rom[slot], v[i].data, 3);
         }
     }
+}
+
+// Sound written with C = port: OUT (C),r / OUTI / OUTD / OTIR / OTDR after a traced LD C,n with n a
+// sound port ($E0-$FF) (Wonder Boy mutes the chip with LD C,$F0 / OUT (C),L / OUT (C),H and OTIR).
+// Follows the code from each such LD C,n until C changes. Marks found[offset] = second opcode byte.
+static int is_out_c_op(uint8_t op2) {
+    return op2 == 0x41 || op2 == 0x49 || op2 == 0x51 || op2 == 0x59 || op2 == 0x61 || op2 == 0x69 || op2 == 0x79 ||
+           op2 == 0xA3 || op2 == 0xAB || op2 == 0xB3 || op2 == 0xBB;
+}
+
+static void sound_via_c(const uint8_t* rom, size_t n, const CodeMap* code, uint8_t* found) {
+    uint8_t* seen = malloc(n);
+    Stack todo = {0};
+    #define PUSHA(a) do { if ((a) >= 0x8000 && (size_t)((a) - 0x8000) < n) push(&todo, (a) - 0x8000); } while (0)
+    for (size_t i = 0; i + 1 < n; i++) {
+        if (rom[i] != 0x0E || rom[i + 1] < 0xE0 || !code->xstart[i] || code->xconflict[i]) continue;
+        memset(seen, 0, n);
+        todo.len = 0;
+        push(&todo, (int32_t)i + 2);
+        int budget = 2000;
+        while (todo.len && budget > 0) {
+            int32_t pc = todo.v[--todo.len];
+            while (pc >= 0 && (size_t)pc < n && !seen[pc] && budget-- > 0) {
+                seen[pc] = 1;
+                uint8_t op = rom[pc], op2 = rom_at(rom, n, pc + 1);
+                uint16_t nn = op2 | (rom_at(rom, n, pc + 2) << 8);
+                int32_t rel = pc + 0x8000 + 2 + (int8_t)op2;
+                if (op == 0xED && is_out_c_op(op2)) found[pc] = op2;
+                if (op == 0xED && op2 == 0x4B) break;                         // LD BC,(nn)
+                // anything that changes C ends this path
+                if (op == 0x0E || op == 0x01 || op == 0xC1 || (op >= 0x48 && op <= 0x4F) || op == 0x0C || op == 0x0D ||
+                    op == 0x03 || op == 0x0B || op == 0xD9 || (op == 0xCB && (op2 & 7) == 1 && (op2 < 0x40 || op2 >= 0x80))) break;
+                if (op == 0xC3) { PUSHA(nn); break; }
+                if (op == 0x18) { PUSHA(rel); break; }
+                if ((op & 0xC7) == 0xC2 || op == 0xCD || (op & 0xC7) == 0xC4) PUSHA(nn);
+                else if (op == 0x10 || (op & 0xE7) == 0x20) PUSHA(rel);
+                if (op == 0xC9 || op == 0xE9 || (op & 0xC7) == 0xC7) break;
+                if (op == 0xED && (op2 == 0x45 || op2 == 0x4D)) break;
+                if ((op == 0xDD || op == 0xFD) && op2 == 0xE9) break;
+                pc += z80_len(rom, n, pc);
+            }
+        }
+    }
+    #undef PUSHA
+    free(todo.v); free(seen);
+}
+
+// The converter's RST $30 handler when some sites write sound with C = port. Those sites are
+// RST $30 / op2 (the instruction's second byte, never 0); plain sound sites are RST $30 / NOP. It
+// reads the byte after the RST: 0 goes to the loader's sound routine; otherwise it returns past the
+// byte, through the thunk for op2 (ops[k] -> thunks[k]). Keeps all registers. Returns its length.
+static int sound_c_handler(uint8_t* c, int addr, const uint8_t* ops, const int* thunks, int nops, int sound) {
+    int n = 0, tail0 = addr + 12 + 5 * nops;
+    const uint8_t head[] = {0xE3, 0xF5, 0x7E, 0xB7, 0x28, (uint8_t)(5 * nops + 1), 0x23};   // EX (SP),HL / PUSH AF / LD A,(HL) / OR A / JR Z,plain / INC HL
+    memcpy(c, head, sizeof head); n = sizeof head;
+    for (int k = 0; k < nops; k++) {                                       // CP op2 / JP Z,tail k
+        int t = tail0 + 5 * k;
+        c[n++] = 0xFE; c[n++] = ops[k]; c[n++] = 0xCA; c[n++] = t & 0xFF; c[n++] = t >> 8;
+    }
+    c[n++] = 0xF1; c[n++] = 0xE3; c[n++] = 0xC3; c[n++] = sound & 0xFF; c[n++] = sound >> 8;       // plain: POP AF / EX (SP),HL / JP sound
+    for (int k = 0; k < nops; k++) {                                       // tail k: POP AF / EX (SP),HL / JP thunk k
+        c[n++] = 0xF1; c[n++] = 0xE3; c[n++] = 0xC3; c[n++] = thunks[k] & 0xFF; c[n++] = thunks[k] >> 8;
+    }
+    return n;
+}
+
+// Replacement for OUT (C),r / OUTI / OUTD / OTIR / OTDR (op2), reached through sound_c_handler: C = $E0-$FF goes to
+// the loader's sound routine (keeps all registers), any other port is really written (a routine
+// shared with the VDP). Registers and the B/HL/Z results as the real instruction. Returns its length.
+static int sound_c_thunk(uint8_t* c, uint8_t op2, int sound) {
+    int n = 0;
+    c[n++] = 0xF5; c[n++] = 0x79; c[n++] = 0xFE; c[n++] = 0xE0; c[n++] = 0x38; c[n++] = 0;   // PUSH AF / LD A,C / CP $E0 / JR C,real
+    if (op2 < 0xA0) {                                                      // OUT (C),r
+        int r = (op2 >> 3) & 7;
+        c[n++] = 0xF1; c[n++] = 0xF5;                                      // POP AF / PUSH AF
+        if (r != 7) c[n++] = 0x78 | r;                                     // LD A,r
+        c[n++] = 0xCD; c[n++] = sound & 0xFF; c[n++] = sound >> 8; c[n++] = 0xF1; c[n++] = 0xC9;   // CALL sound / POP AF / RET
+    } else {                                                               // OUTI / OUTD / OTIR / OTDR
+        int loop = n;
+        c[n++] = 0x7E; c[n++] = 0xCD; c[n++] = sound & 0xFF; c[n++] = sound >> 8;   // loop: LD A,(HL) / CALL sound
+        c[n++] = op2 & 0x08 ? 0x2B : 0x23; c[n++] = 0x05;                  // INC HL or DEC HL / DEC B
+        if (op2 & 0x10) { c[n] = 0x20; c[n + 1] = (uint8_t)(loop - (n + 2)); n += 2; }   // JR NZ,loop
+        c[n++] = 0xF1; c[n++] = 0x04; c[n++] = 0x05; c[n++] = 0xC9;        // POP AF / INC B / DEC B (Z = B is 0) / RET
+    }
+    c[5] = (uint8_t)(n - 6);
+    c[n++] = 0xF1; c[n++] = 0xED; c[n++] = op2; c[n++] = 0xC9;             // real: POP AF / the instruction / RET
+    return n;
 }
 
 // An NMI handler that does EI (MSX-style) re-enters itself on the NABU: the loader calls it before
@@ -557,6 +650,64 @@ void apply_auto_patches(uint8_t* rom, size_t rom_len, int swap_joy, int smart_po
             for (int s = 0; s < last_nsites && vecs[k].nsites < 1024; s++) vecs[k].sites[vecs[k].nsites++] = last_sites[s];
         }
     }
+    // The sound chip answers to every port $E0-$FF (Wonder Boy writes $F0). $FF and $E0 are patched
+    // anywhere above; the others in traced code, or right after LD A,n / OR n with a sound latch byte
+    // (bit 7 set; Wonder Boy's music driver is only reached through a jump table).
+    const VectorPatch* snd = &vec_patches[0];
+    int ks = 0;
+    while (ks < nv && vecs[ks].slot != snd->vector_offset) ks++;
+    for (int p = 0xE1; p < 0xFF; p++) {
+        static char descs[0x20][32];
+        char* desc = descs[p & 0x1F];
+        snprintf(desc, sizeof descs[0], "Sound port 0x%X (RST 0x30)", p);
+        const uint8_t out_p[2] = {0xD3, (uint8_t)p};
+        if (find_and_replace(rom, rom_len, out_p, snd->replace, 2, desc, code, ACCEPT_SOUND) > 0) {
+            if (ks == nv) { vecs[ks].slot = snd->vector_offset; memcpy(vecs[ks].data, snd->vector_data, 3); vecs[ks].desc = desc; vecs[ks].nsites = 0; nv++; }
+            for (int s = 0; s < last_nsites && vecs[ks].nsites < 1024; s++) vecs[ks].sites[vecs[ks].nsites++] = last_sites[s];
+        }
+    }
+    if (gap && gap->next) {
+        uint8_t* found = calloc(rom_len, 1);
+        sound_via_c(rom, rom_len, code, found);
+        int sound = snd->vector_data[1] | (snd->vector_data[2] << 8), nops = 0, size = 0;
+        uint8_t ops[16], bodies[16][32];
+        int blen[16], thunks[16];
+        for (size_t i = 0; i < rom_len; i++) {                               // one thunk per instruction, in order of first site
+            if (!found[i]) continue;
+            int k = 0;
+            while (k < nops && ops[k] != found[i]) k++;
+            if (k == nops) { ops[nops] = found[i]; blen[nops] = sound_c_thunk(bodies[nops], found[i], sound); size += blen[nops++]; }
+        }
+        size += 12 + 10 * nops;
+        if (nops && gap->next + size > gap->end) printf("\n    Sound via OUT (C) - no room!");
+        else if (nops) {
+            static uint8_t h[256];
+            for (int k = 0; k < nops; k++) {
+                thunks[k] = gap->next;
+                memcpy(&gap->stub[gap_off(gap, gap->next)], bodies[k], blen[k]);
+                gap->next += blen[k];
+            }
+            int hlen = sound_c_handler(h, gap->next, ops, thunks, nops, sound);
+            memcpy(&gap->stub[gap_off(gap, gap->next)], h, hlen);
+            if (ks == nv) { vecs[ks].slot = snd->vector_offset; memcpy(vecs[ks].data, snd->vector_data, 3); vecs[ks].desc = "Sound (RST 0x30)"; vecs[ks].nsites = 0; nv++; }
+            for (size_t i = 0; i < rom_len; i++) {
+                if (!found[i]) continue;
+                uint8_t op2 = found[i];
+                if (op2 == 0xA3 || op2 == 0xAB || op2 == 0xB3 || op2 == 0xBB)
+                    printf("\n    [0x%04X] Sound via %s (RST 0x30)", (uint32_t)i,
+                           op2 == 0xA3 ? "OUTI" : op2 == 0xAB ? "OUTD" : op2 == 0xB3 ? "OTIR" : "OTDR");
+                else printf("\n    [0x%04X] Sound via OUT (C),%c (RST 0x30)", (uint32_t)i, "BCDEHL?A"[(op2 >> 3) & 7]);
+                rom[i] = 0xF7;                                              // RST $30 / op2
+                if (vecs[ks].nsites < 1024) vecs[ks].sites[vecs[ks].nsites++] = (int)i;
+            }
+            static char sdesc[96];
+            snprintf(sdesc, sizeof sdesc, "%s (OUT (C) sites: handler at 0x%04X)", vecs[ks].desc, gap->next);
+            vecs[ks].desc = sdesc;
+            vecs[ks].data[0] = 0xC3; vecs[ks].data[1] = gap->next & 0xFF; vecs[ks].data[2] = gap->next >> 8;
+            gap->next += hlen;
+        }
+        free(found);
+    }
     // Controllers read with IN A,(C), C = port (Wonder Boy): if traced code loads C with a controller
     // port (LD C,$FC / LD C,$FF), IN A,(C) -> RST $08 -> the loader's read_port_c, which reads a
     // controller for C = $E0-$FF and the real port otherwise.
@@ -588,9 +739,86 @@ void apply_auto_patches(uint8_t* rom, size_t rom_len, int swap_joy, int smart_po
     free_code(code);
 }
 
-// ... [apply_external_patches remains the same as previous version] ...
+// patches.z80: known titles' patches, by ROM CRC16, in the loader's patcher format (brijohn's
+// patcher.z80). "patchset:" is a table of .word crc, .word label pairs; each label's directives
+// assemble to a byte stream of entries: .word address (0 = end), .byte count, then count data bytes
+// (written as .byte or .word, little-endian). Addresses are CPU addresses ($8000 = ROM offset 0).
+// Returns 1 if the CRC is listed (its patches replace the automatic ones, even an empty list).
+static char* patches_text = NULL;       // patches.z80, loaded by main (NULL: none)
 
-void process_file(const char* filename, uint8_t* stub_data, size_t stub_len, int skip_patches, int swap_joy, int smart_ports, int swapfire) {
+static int directive(char* line, char** args) {         // 1 = .word, 2 = .byte, 0 = other; strips comments
+    char* c = strchr(line, ';'); if (c) *c = 0;
+    while (*line == ' ' || *line == '\t') line++;
+    if (!strncmp(line, ".word", 5) && (line[5] == ' ' || line[5] == '\t')) { *args = line + 5; return 1; }
+    if (!strncmp(line, ".byte", 5) && (line[5] == ' ' || line[5] == '\t')) { *args = line + 5; return 2; }
+    return 0;
+}
+
+static int label_of(const char* line, char* out, size_t n) {   // "name:" at the start of a line
+    size_t k = 0;
+    while (line[k] && (isalnum((unsigned char)line[k]) || line[k] == '_') && k + 1 < n) { out[k] = line[k]; k++; }
+    if (k == 0 || line[k] != ':' || isdigit((unsigned char)line[0])) return 0;
+    out[k] = 0; return 1;
+}
+
+int apply_external_patches(uint8_t* rom, size_t rom_len, uint16_t target_crc) {
+    if (!patches_text) return 0;
+    char* text = strdup(patches_text);
+    char cur[128] = "", target[128] = "";
+    uint8_t* s = malloc(strlen(text) + 16);      // byte stream of the target's entries
+    size_t sn = 0;
+    int pending_crc = -1, found = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 1) { if (!found) break; free(text); text = strdup(patches_text); cur[0] = 0; }
+        for (char* line = strtok(text, "\r\n"); line; line = strtok(NULL, "\r\n")) {
+            char name[128], *args;
+            if (label_of(line, name, sizeof name)) { strcpy(cur, name); continue; }
+            int d = directive(line, &args);
+            if (!d) continue;
+            // split args on commas by hand (strtok is busy with lines)
+            char* p = args;
+            while (*p) {
+                while (*p == ' ' || *p == '\t' || *p == ',') p++;
+                if (!*p) break;
+                char tokbuf[128]; size_t k = 0;
+                while (p[k] && p[k] != ',' && k + 1 < sizeof tokbuf) { tokbuf[k] = p[k]; k++; }
+                p += k; tokbuf[k] = 0;
+                while (k && (tokbuf[k - 1] == ' ' || tokbuf[k - 1] == '\t')) tokbuf[--k] = 0;
+                int is_num = isdigit((unsigned char)tokbuf[0]);
+                long v = is_num ? strtol(tokbuf, NULL, 0) : 0;
+                if (pass == 0 && !strcmp(cur, "patchset") && d == 1) {
+                    if (pending_crc < 0) { if (is_num) pending_crc = (int)v; }
+                    else {
+                        if (!found && pending_crc == target_crc && !is_num) { strcpy(target, tokbuf); found = 1; }
+                        pending_crc = -1;
+                    }
+                } else if (pass == 1 && !strcmp(cur, target)) {
+                    if (d == 2) s[sn++] = (uint8_t)v;
+                    else { s[sn++] = (uint8_t)v; s[sn++] = (uint8_t)(v >> 8); }
+                }
+            }
+        }
+    }
+    free(text);
+    if (!found) { free(s); return 0; }
+    printf("\n  [CRC MATCH]: %s", target);
+    for (size_t p = 0; p + 2 < sn; ) {
+        int addr = s[p] | (s[p + 1] << 8), n = s[p + 2];
+        if (addr == 0) break;
+        const uint8_t* data = &s[p + 3];
+        int have = (int)(sn - (p + 3)) < n ? (int)(sn - (p + 3)) : n;
+        p += 3 + n;
+        long off = addr - 0x8000;
+        if (off < 0 || (size_t)(off + have) > rom_len) { printf("\n    [0x%04X] outside the ROM, skipped", addr); continue; }
+        memcpy(&rom[off], data, have);
+        printf("\n    [0x%04X] %d byte%s:", (unsigned)off, have, have == 1 ? "" : "s");
+        for (int k = 0; k < have; k++) printf(" %02x", data[k]);
+    }
+    free(s);
+    return 1;
+}
+
+void process_file(const char* filename, uint8_t* stub_data, size_t stub_len, int skip_patches, int swap_joy, int smart_ports, int swapfire, int upbutton2) {
     FILE* f = fopen(filename, "rb");
     if (!f) return;
     fseek(f, 0, SEEK_END); size_t rom_len = ftell(f); fseek(f, 0, SEEK_SET);
@@ -609,10 +837,15 @@ void process_file(const char* filename, uint8_t* stub_data, size_t stub_len, int
         stub[gap_off(&gap, gap.options)] |= LOADER_OPT_SWAP_FIRE;
         printf("\n  Fire buttons swapped: joystick fire = right button");
     }
+    if (upbutton2 && have_gap) {
+        stub[gap_off(&gap, gap.options)] |= LOADER_OPT_UP_BUTTON2;
+        printf("\n  Up = button 2 (%s Coleco button)", swapfire ? "left" : "right");
+    }
     cur_known = NULL;
     for (size_t k = 0; k < sizeof known_data / sizeof known_data[0]; k++)
         if (known_data[k].crc == crc) cur_known = known_data[k].offsets;
-    if (!skip_patches) apply_auto_patches(rom, rom_len, swap_joy, smart_ports, have_gap ? &gap : NULL);
+    if (!skip_patches && !apply_external_patches(rom, rom_len, crc))
+        apply_auto_patches(rom, rom_len, swap_joy, smart_ports, have_gap ? &gap : NULL);
     if (have_gap) stub[gap_off(&gap, gap.options)] |= gap.option_bits;     // loader options (port swap)
 
     char base[1024]; strncpy(base, filename, 1023);
@@ -644,21 +877,26 @@ void process_file(const char* filename, uint8_t* stub_data, size_t stub_len, int
 }
 
 int main(int argc, char* argv[]) {
-    printf("coleco2nabu v0.3 by GTAMP (c) 2026\n");
-    int skip = 0, swap = 2, f_count = 0, smart = 1, swapfire = 0;   // swap: 2 = auto
+    printf("coleco2nabu v0.4 by GTAMP (c) 2026\n");
+    printf("based on Coleco Loader by Brian Johnson\n");
+    int skip = 0, swap = 2, f_count = 0, smart = 1, swapfire = 0, upbutton2 = 0;   // swap: 2 = auto
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-nopatch")) skip = 1;
         else if (!strcmp(argv[i], "-swapfire")) swapfire = 1;
+        else if (!strcmp(argv[i], "-upbutton2")) upbutton2 = 1;
         else if (!strcmp(argv[i], "-swapjoy")) swap = 1;
         else if (!strcmp(argv[i], "-noswapjoy")) swap = 0;
         else if (!strcmp(argv[i], "-nosmart")) smart = 0;
         else if (!strcmp(argv[i], "-2")) ;   // old 2-player stub switch: the one stub does both now
         else f_count++;
     }
-    if (f_count == 0) { printf("\nUsage: coleco2nabu <roms> [-nopatch] [-swapjoy|-noswapjoy] [-swapfire] [-nosmart]\n"
-                                 "  joystick ports are swapped automatically when the game reads port FC directly\n"
-                                 "  -swapfire: joystick fire (and <|||) = right Coleco button, |||> = left\n"
-                                 "  NABU joystick 1/2 = Coleco controller 1/2, keyboard = controller 1; SYM swaps sides\n"); return 1; }
+    if (f_count == 0) { printf("\nUsage: coleco2nabu <roms> [-nopatch] [-swapjoy|-noswapjoy] [-swapfire] [-upbutton2] [-nosmart]\n"); return 1; }
+
+    FILE* pf = fopen("patches.z80", "rb");       // known titles' patches (optional)
+    if (pf) {
+        fseek(pf, 0, SEEK_END); long pl = ftell(pf); fseek(pf, 0, SEEK_SET);
+        patches_text = calloc(pl + 1, 1); fread(patches_text, 1, pl, pf); fclose(pf);
+    } else printf("Note: patches.z80 not found, known-title patches are not applied\n");
 
     FILE* ts = fopen("coleco2nabu.001", "rb");   // loader stub, built from loader/ (build.py)
     if (!ts) { ts = fopen("coleco2nabu.bin", "rb"); if (!ts) return 1; }
@@ -674,7 +912,7 @@ int main(int argc, char* argv[]) {
         if ((h = _findfirst(pat, &cf)) != -1L) {
             do { if (!(cf.attrib & _A_SUBDIR)) { 
                 char full[2048]; snprintf(full, 2048, "%s%s", dir, cf.name); 
-                process_file(full, sd, sl, skip, swap, smart, swapfire);
+                process_file(full, sd, sl, skip, swap, smart, swapfire, upbutton2);
             } } while (_findnext(h, &cf) == 0);
             _findclose(h);
         }
