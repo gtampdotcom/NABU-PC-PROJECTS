@@ -2719,68 +2719,48 @@ function wrapNmi(rom, gap, log, readsIFF) {
   gap.next += c.length;
 }
 
-// Faithful re-implementation of the quirky line-based patches.z80 parser from apply_external_patches().
+// patches.z80: known titles' patches, by ROM CRC16, in the loader's patcher format (brijohn's
+// patcher.z80). "patchset:" is a table of .word crc, .word label pairs; each label's directives
+// assemble to a byte stream of entries: .word address (0 = end), .byte count, then count data bytes
+// (written as .byte or .word, little-endian). Addresses are CPU addresses ($8000 = ROM offset 0).
+// Returns true if the CRC is listed (its patches replace the automatic ones, even an empty list).
 function applyExternalPatches(rom, targetCrc, patchesText, log) {
-  const lines = patchesText.split(/\r?\n/);
-  const crcSearch = "0x" + (targetCrc & 0xFFFF).toString(16).padStart(4, "0"); // lowercase, matches sprintf("0x%04x",...)
-
-  // Pass 1: find the line containing the crc (case-insensitive), then the next line containing ".word" gives the label.
-  let targetLabel = null;
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].toLowerCase().includes(crcSearch)) {
-      for (let j = i + 1; j < lines.length; j++) {
-        const idx = lines[j].indexOf(".word");
-        if (idx !== -1) {
-          const after = lines[j].slice(idx + 5).trim();
-          const m = after.match(/^\S+/);
-          if (m) targetLabel = m[0];
-          break;
-        }
-      }
-      break;
+  // label -> the bytes its .word/.byte directives assemble to (labels as values: their name)
+  const blocks = new Map();
+  let cur = null;
+  const num = (t) => /^0[xX]/.test(t) ? parseInt(t, 16) : /^\d+$/.test(t) ? parseInt(t, 10) : t;
+  for (const raw of patchesText.split(/\r?\n/)) {
+    const line = raw.replace(/;.*/, "").trim();
+    const lab = line.match(/^([A-Za-z_]\w*):/);
+    if (lab) { cur = []; blocks.set(lab[1], cur); continue; }
+    const dir = line.match(/^\.(word|byte)\s+(.*)$/);
+    if (!dir || !cur) continue;
+    for (const t of dir[2].split(",").map((s) => num(s.trim()))) {
+      if (dir[1] === "byte") cur.push(t & 0xFF);
+      else if (typeof t === "string") cur.push(t);                       // label reference
+      else cur.push(t & 0xFF, (t >> 8) & 0xFF);
     }
   }
-  if (!targetLabel) return false;
-  log(`  [CRC MATCH]: ${targetLabel}`);
-
-  // Pass 2: locate the label, then apply .word / .byte directives until ".word 0".
-  let inLabel = false;
-  let currentOff = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!inLabel) {
-      const trimmed = line.replace(/^\s+/, "");
-      if (trimmed.startsWith(targetLabel)) inLabel = true;
-      continue;
-    }
-    const ptr = line.replace(/^\s+/, "");
-    if (ptr.startsWith(".word")) {
-      const val = parseHexC(ptr.slice(5)) & 0xFFFFFFFF;
-      if (val === 0) break;
-      if (val >= 0x8000) {
-        currentOff = (val - 0x8000) & 0xFFFF;
-        log(`    [${hex4(currentOff)}] Target Pointer Set`);
-      } else if (currentOff + 1 < rom.length) {
-        rom[currentOff++] = val & 0xFF;
-        rom[currentOff++] = (val >> 8) & 0xFF;
-      }
-    } else if (ptr.startsWith(".byte")) {
-      let rest = ptr.slice(5);
-      const cm = rest.match(/^\s*(0[xX][0-9a-fA-F]+|\d+)/);
-      const count = cm ? parseInt(cm[0], cm[0].toLowerCase().startsWith("0x") ? 16 : 10) : 0;
-      let pos = cm ? cm.index + cm[0].length : rest.length;
-      const isHex = (c) => /[0-9a-fA-F]/.test(c);
-      const isHexOrX = (c) => /[0-9a-fA-Fx X]/.test(c);
-      for (let b = 0; b < count; b++) {
-        while (pos < rest.length && !isHex(rest[pos])) pos++;
-        if (pos < rest.length) {
-          const val = parseHexC(rest.slice(pos));
-          if (currentOff < rom.length) rom[currentOff++] = val & 0xFF;
-          while (pos < rest.length && isHexOrX(rest[pos])) pos++;
-        }
-        // if pos reached end of line, remaining iterations are no-ops (matches original C quirk)
-      }
-    }
+  const table = blocks.get("patchset") || [];
+  let label = null;
+  for (let i = 0; i + 2 < table.length; ) {                             // crc (2 bytes), label
+    const crc = table[i] | (table[i + 1] << 8);
+    if (crc === 0) break;
+    if (crc === (targetCrc & 0xFFFF)) { label = table[i + 2]; break; }
+    i += 3;
+  }
+  if (typeof label !== "string") return false;
+  log(`  [CRC MATCH]: ${label}`);
+  const s = blocks.get(label) || [0, 0];
+  for (let p = 0; p + 2 < s.length; ) {
+    const addr = s[p] | (s[p + 1] << 8), n = s[p + 2];
+    if (addr === 0) break;
+    const data = s.slice(p + 3, p + 3 + n);
+    p += 3 + n;
+    const off = addr - 0x8000;
+    if (off < 0 || off + data.length > rom.length) { log(`    [${hex4(addr)}] outside the ROM, skipped`); continue; }
+    rom.set(data, off);
+    log(`    [${hex4(off)}] ${data.length} byte${data.length === 1 ? "" : "s"}: ${data.map((b) => b.toString(16).padStart(2, "0")).join(" ")}`);
   }
   return true;
 }
