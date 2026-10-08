@@ -2,7 +2,7 @@ This program tries to convert ColecoVision roms to NABU PC
 
 It won't work on all games and many games will have bugs. It can only accept roms under 32KB.
 
-coleco2nabu v0.4 by GTAMP (c) 2026
+coleco2nabu by GTAMP (c) 2026
 based on Coleco Loader by Brian Johnson
 
 Usage: coleco2nabu <roms> [-nopatch] [-swapjoy|-noswapjoy] [-swapfire] [-upbutton2] [-nosmart]
